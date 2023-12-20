@@ -1,0 +1,12 @@
+<map id="inheritance71ee225fa0" name="inheritance71ee225fa0">
+<area shape="rect" id="node1" href="panel.reactive.html#panel.reactive.Reactive" target="_top" title="Reactive is a Viewable object that also supports syncing between" alt="" coords="620,26,753,48"/>
+<area shape="rect" id="node9" href="#panel.widgets.base.Widget" target="_top" title="Widgets allow syncing changes in bokeh widget models with the" alt="" coords="793,26,942,48"/>
+<area shape="rect" id="node2" title="Syncable is an extension of the Renderable object which can not" alt="" coords="443,4,578,27"/>
+<area shape="rect" id="node3" href="panel.viewable.html#panel.viewable.Viewable" target="_top" title="Viewable is the baseclass all visual components in the panel" alt="" coords="441,47,579,69"/>
+<area shape="rect" id="node4" title="Baseclass for objects which can be rendered to a Bokeh model." alt="" coords="246,4,394,27"/>
+<area shape="rect" id="node5" href="panel.viewable.html#panel.viewable.Layoutable" target="_top" title="Layoutable defines shared style and layout related parameters" alt="" coords="247,47,393,69"/>
+<area shape="rect" id="node6" title="Base class for named objects that support Parameters and message" alt="" coords="4,47,199,69"/>
+<area shape="rect" id="node7" title="Mixin class to allow rendering and syncing objects in notebook" alt="" coords="11,4,192,27"/>
+<area shape="rect" id="node8" title="Mixin to define methods shared by objects which can served." alt="" coords="239,90,401,112"/>
+<area shape="rect" id="node10" href="#panel.widgets.icon.ToggleIcon" target="_top" title="panel.widgets.icon.ToggleIcon" alt="" coords="983,26,1148,48"/>
+</map>
