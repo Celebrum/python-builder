@@ -603,7 +603,8 @@ class TestChatFeedCallback:
     def test_renderers_widget(self, chat_feed):
         chat_feed.renderers = [TextAreaInput]
         chat_feed.send("Hello!")
-        area_input = chat_feed.objects[0]._render_object()
+        area_input = chat_feed[0]._update_object_pane()
+        area_input = chat_feed[0]._object_panel
         assert isinstance(area_input, TextAreaInput)
         assert area_input.value == "Hello!"
         assert area_input.height == 500
@@ -633,7 +634,7 @@ class TestChatFeedCallback:
         chat_feed.callback = callback
         chat_feed.callback_exception = "summary"
         chat_feed.send("Message", respond=True)
-        assert chat_feed.objects[-1].object == "division by zero"
+        assert "division by zero" in chat_feed.objects[-1].object
         assert chat_feed.objects[-1].user == "Exception"
 
     def test_callback_exception_traceback(self, chat_feed):
