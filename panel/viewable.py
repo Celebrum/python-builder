@@ -11,6 +11,7 @@ and become viewable including:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -18,9 +19,9 @@ import threading
 import traceback
 import uuid
 
-from functools import partial
 from typing import (
     IO, TYPE_CHECKING, Any, Callable, ClassVar, Dict, List, Mapping, Optional,
+    Type,
 )
 
 import param  # type: ignore
@@ -43,8 +44,9 @@ from .io.notebook import (
     render_mimebundle, render_model, show_server,
 )
 from .io.save import save
-from .io.state import curdoc_locked, state
+from .io.state import curdoc_locked, set_curdoc, state
 from .util import escape, param_reprs
+from .util.parameters import get_params_to_inherit
 from .util.warnings import deprecated
 
 if TYPE_CHECKING:
@@ -53,6 +55,8 @@ if TYPE_CHECKING:
     from bokeh.server.server import Server
 
     from .io.location import Location
+    from .io.server import StoppableThread
+    from .theme import Design
 
 
 class Layoutable(param.Parameterized):
@@ -78,7 +82,7 @@ class Layoutable(param.Parameterized):
     background = param.Parameter(default=None, doc="""
         Background color of the component.""")
 
-    css_classes = param.List(default=[], doc="""
+    css_classes = param.List(default=[], nested_refs=True, doc="""
         CSS classes to apply to the layout.""")
 
     design = param.ObjectSelector(default=None, objects=[], doc="""
@@ -105,15 +109,15 @@ class Layoutable(param.Parameterized):
         be specified as a two-tuple of the form (vertical, horizontal)
         or a four-tuple (top, right, bottom, left).""")
 
-    styles = param.Dict(default={}, doc="""
+    styles = param.Dict(default={}, nested_refs=True, doc="""
         Dictionary of CSS rules to apply to DOM node wrapping the
         component.""")
 
-    stylesheets = param.List(default=[], doc="""
+    stylesheets = param.List(default=[], nested_refs=True, doc="""
         List of stylesheets defined as URLs pointing to .css files
         or raw CSS defined as a string.""")
 
-    tags = param.List(default=[], doc="""
+    tags = param.List(default=[], nested_refs=True, doc="""
         List of arbitrary tags to add to the component.
         Can be useful for templating or for storing metadata on
         the model.""")
@@ -320,11 +324,12 @@ class ServableMixin:
         from .io.location import Location
         if isinstance(location, Location):
             loc = location
+            state._locations[doc] = loc
         elif doc in state._locations:
             loc = state._locations[doc]
         else:
-            loc = Location()
-        state._locations[doc] = loc
+            with set_curdoc(doc):
+                loc = state.location
         if root is None:
             loc_model = loc.get_root(doc)
         else:
@@ -390,8 +395,10 @@ class ServableMixin:
             else:
                 self.server_doc(title=title, location=location) # type: ignore
         elif state._is_pyodide and 'pyodide_kernel' not in sys.modules:
-            from .io.pyodide import _IN_WORKER, _get_pyscript_target, write
-            if _IN_WORKER:
+            from .io.pyodide import (
+                _IN_PYSCRIPT_WORKER, _IN_WORKER, _get_pyscript_target, write,
+            )
+            if _IN_WORKER and not _IN_PYSCRIPT_WORKER:
                 return self
             try:
                 target = target or _get_pyscript_target()
@@ -405,7 +412,7 @@ class ServableMixin:
         self, title: Optional[str] = None, port: int = 0, address: Optional[str] = None,
         websocket_origin: Optional[str] = None, threaded: bool = False, verbose: bool = True,
         open: bool = True, location: bool | 'Location' = True, **kwargs
-    ) -> threading.Thread | 'Server':
+    ) -> 'StoppableThread' | 'Server':
         """
         Starts a Bokeh server and displays the Viewable in a new tab.
 
@@ -435,7 +442,7 @@ class ServableMixin:
 
         Returns
         -------
-        server: bokeh.server.Server or threading.Thread
+        server: bokeh.server.Server or panel.io.server.StoppableThread
           Returns the Bokeh server instance or the thread the server
           was launched on (if threaded=True)
         """
@@ -485,7 +492,7 @@ class MimeRenderMixin:
             handle.update({'text/html': '\n'.join(accumulator)}, raw=True)
 
     def _on_stdout(self, ref: str, stdout: Any) -> None:
-        if ref not in state._handles or config.console_output is [None, 'disable']:
+        if ref not in state._handles or config.console_output in [None, 'disable']:
             return
         handle, accumulator = state._handles[ref]
         formatted = ["%s</br>" % o for o in stdout]
@@ -502,9 +509,9 @@ class MimeRenderMixin:
         ref = model.ref['id']
         manager = CommManager(comm_id=comm.id, plot_id=ref)
         client_comm = state._comm_manager.get_client_comm(
-            on_msg=partial(self._on_msg, ref, manager),
-            on_error=partial(self._on_error, ref),
-            on_stdout=partial(self._on_stdout, ref)
+            on_msg=functools.partial(self._on_msg, ref, manager),
+            on_error=functools.partial(self._on_error, ref),
+            on_stdout=functools.partial(self._on_stdout, ref)
         )
         self._comms[ref] = (comm, client_comm)
         manager.client_comm_id = client_comm.id
@@ -574,13 +581,23 @@ class Renderable(param.Parameterized, MimeRenderMixin):
         if ref in state._handles:
             del state._handles[ref]
 
-    def _preprocess(self, root: 'Model') -> None:
+    def _preprocess(self, root: 'Model', changed=None, old_models=None) -> None:
         """
-        Applies preprocessing hooks to the model.
+        Applies preprocessing hooks to the root model.
+
+        Some preprocessors have to always iterate over the entire
+        model tree but others only have to update newly added models.
+        To support the optimized case we optionally provide the
+        Panel object that was changed and any old, unchanged models
+        so they can be skipped (see https://github.com/holoviz/panel/pull/4989)
         """
+        changed = self if changed is None else changed
         hooks = self._preprocessing_hooks+self._hooks
         for hook in hooks:
-            hook(self, root)
+            try:
+                hook(self, root, changed, old_models)
+            except TypeError:
+                hook(self, root)
 
     def _render_model(self, doc: Optional[Document] = None, comm: Optional[Comm] = None) -> 'Model':
         if doc is None:
@@ -660,7 +677,6 @@ class Renderable(param.Parameterized, MimeRenderMixin):
         state._views[ref] = (root_view, root, doc, comm)
         return root
 
-
 class Viewable(Renderable, Layoutable, ServableMixin):
     """
     Viewable is the baseclass all visual components in the panel
@@ -682,7 +698,8 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         super().__init__(**params)
         self._hooks = hooks
 
-        self._update_loading()
+        if self.loading:
+            self._update_loading()
         self._update_background()
         self._update_design()
         self._internal_callbacks.extend([
@@ -691,15 +708,19 @@ class Viewable(Renderable, Layoutable, ServableMixin):
             self.param.watch(self._update_loading, 'loading')
         ])
 
+    @staticmethod
+    @functools.cache
+    def _instantiate_design(design: Type[Design], theme: str) -> Design:
+        return design(theme=theme)
+
     def _update_design(self, *_):
         from .theme import Design
         from .theme.native import Native
         if isinstance(self.design, Design):
             self._design = self.design
-        elif self.design:
-            self._design = self.design(theme=config.theme)
         else:
-            self._design = Native(theme=config.theme)
+            design = self.design or Native
+            self._design = self._instantiate_design(design, config.theme)
 
     def _update_loading(self, *_) -> None:
         if self.loading:
@@ -714,7 +735,7 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         # Warning
         prev = f'{type(self).name}(..., background={self.background!r})'
         new = f"{type(self).name}(..., styles={{'background': {self.background!r}}})"
-        deprecated("1.1", prev, new)
+        deprecated("1.4", prev, new)
 
         self.styles = dict(self.styles, background=self.background)
 
@@ -839,19 +860,15 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         -------
         Cloned Viewable object
         """
-        inherited = {
-            p: v for p, v in self.param.values().items()
-            if not self.param[p].readonly and v is not self.param[p].default
-            and not (v is None and not self.param[p].allow_None)
-        }
+        inherited = get_params_to_inherit(self)
         return type(self)(**dict(inherited, **params))
 
     def pprint(self) -> None:
         """
         Prints a compositional repr of the class.
         """
-        deprecated('1.1', f'{type(self).__name__}.pprint', 'print')
-        print(self)
+        deprecated('1.4', f'{type(self).__name__}.pprint', 'print')
+        print(self)  # noqa: T201
 
     def select(
         self, selector: Optional[type | Callable[['Viewable'], bool]] = None
@@ -888,7 +905,7 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         port: int (optional, default=0)
           Allows specifying a specific port
         """
-        deprecated('1.1', f'{type(self).__name__}.app', 'panel.io.notebook.show_server')
+        deprecated('1.4', f'{type(self).__name__}.app', 'panel.io.notebook.show_server')
         return show_server(self, notebook_url, port)
 
     def embed(
@@ -1025,7 +1042,7 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         if location:
             self._add_location(doc, location, model)
         if config.notifications and doc is state.curdoc:
-            notification_model = state.notifications._get_model(doc, model)
+            notification_model = state.notifications.get_root(doc)
             notification_model.name = 'notifications'
             doc.add_root(notification_model)
         if config.browser_info and doc is state.curdoc:

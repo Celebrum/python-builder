@@ -20,6 +20,8 @@ from contextlib import contextmanager
 
 import param
 
+from param.parameterized import iscoroutinefunction
+
 from .state import state
 
 #---------------------------------------------------------------------
@@ -190,14 +192,14 @@ def _generate_hash_inner(obj):
             raise ValueError(
                 f'User hash function {hash_func!r} failed for input '
                 f'{obj!r} with following error: {type(e).__name__}("{e}").'
-            )
+            ) from e
         return output
     if hasattr(obj, '__reduce__'):
         h = hashlib.new("md5")
         try:
             reduce_data = obj.__reduce__()
         except BaseException:
-            raise ValueError(f'Could not hash object of type {type(obj).__name__}')
+            raise ValueError(f'Could not hash object of type {type(obj).__name__}') from None
         for item in reduce_data:
             h.update(_generate_hash(item))
         return h.digest()
@@ -302,11 +304,12 @@ def compute_hash(func, hash_funcs, args, kwargs):
 
 def cache(
     func=None, hash_funcs=None, max_items=None, policy='LRU',
-    ttl=None, to_disk=False, cache_path='./cache'
+    ttl=None, to_disk=False, cache_path='./cache', per_session=False
 ):
     """
-    Decorator to memoize functions with options to configure the
-    caching behavior
+    Memoizes functions for a user session. Can be used as function annotation or just directly.
+
+    For global caching across user sessions use `pn.state.as_cached`.
 
     Arguments
     ---------
@@ -328,6 +331,8 @@ def cache(
         Whether to cache to disk using diskcache.
     cache_dir: str
         Directory to cache to on disk.
+    per_session: bool
+        Whether to cache data only for the current session.
     """
     if policy.lower() not in ('fifo', 'lru', 'lfu'):
         raise ValueError(
@@ -348,8 +353,7 @@ def cache(
 
     lock = threading.RLock()
 
-    @functools.wraps(func)
-    def wrapped_func(*args, **kwargs):
+    def hash_func(*args, **kwargs):
         global func_hash
         # Handle param.depends method by adding parameters to arguments
         func_name = func.__name__
@@ -375,6 +379,8 @@ def cache(
             func_hash = (fname, type(args[0]).__name__, func.__name__)
         else:
             func_hash = (fname, func.__name__)
+        if per_session:
+            func_hash += (id(state.curdoc),)
         func_hash = hashlib.sha256(_generate_hash(func_hash)).hexdigest()
 
         func_cache = state._memoize_cache.get(func_hash)
@@ -391,21 +397,45 @@ def cache(
             _cleanup_ttl(func_cache, ttl, time)
 
         if hash_value in func_cache:
-            with lock:
-                ret, ts, count, _ = func_cache[hash_value]
-                func_cache[hash_value] = (ret, ts, count+1, time)
-                return ret
+            return func_cache, hash_value, time
 
         if max_items is not None:
             _cleanup_cache(func_cache, policy, max_items, time)
 
-        ret = func(*args, **kwargs)
-        with lock:
-            func_cache[hash_value] = (ret, time, 0, time)
-        return ret
+        return func_cache, hash_value, time
 
-    def clear():
+    if iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def wrapped_func(*args, **kwargs):
+            func_cache, hash_value, time = hash_func(*args, **kwargs)
+            if hash_value in func_cache:
+                with lock:
+                    ret, ts, count, _ = func_cache[hash_value]
+                    func_cache[hash_value] = (ret, ts, count+1, time)
+            else:
+                ret = await func(*args, **kwargs)
+                with lock:
+                    func_cache[hash_value] = (ret, time, 0, time)
+            return ret
+    else:
+        @functools.wraps(func)
+        def wrapped_func(*args, **kwargs):
+            func_cache, hash_value, time = hash_func(*args, **kwargs)
+            if hash_value in func_cache:
+                with lock:
+                    ret, ts, count, _ = func_cache[hash_value]
+                    func_cache[hash_value] = (ret, ts, count+1, time)
+            else:
+                ret = func(*args, **kwargs)
+                with lock:
+                    func_cache[hash_value] = (ret, time, 0, time)
+            return ret
+
+    def clear(session_context=None):
         global func_hash
+        # clear called before anything is cached.
+        if 'func_hash' not in globals():
+            return
         if func_hash is None:
             return
         if to_disk:
@@ -416,6 +446,9 @@ def cache(
             cache = state._memoize_cache.get(func_hash, {})
         cache.clear()
     wrapped_func.clear = clear
+
+    if per_session and state.curdoc and state.curdoc.session_context:
+        state.curdoc.on_session_destroyed(clear)
 
     try:
         wrapped_func.__dict__.update(func.__dict__)

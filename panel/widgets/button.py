@@ -5,20 +5,20 @@ events or merely toggling between on-off states.
 from __future__ import annotations
 
 from typing import (
-    TYPE_CHECKING, Any, Callable, ClassVar, Dict, List, Mapping, Optional,
-    Type,
+    TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Dict, List, Mapping,
+    Optional, Type,
 )
 
 import param
 
 from bokeh.events import ButtonClick, MenuItemClick
-from bokeh.models import (
-    Button as _BkButton, Dropdown as _BkDropdown, Toggle as _BkToggle,
-)
+from bokeh.models import Dropdown as _BkDropdown, Toggle as _BkToggle
 from bokeh.models.ui import SVGIcon, TablerIcon
 
 from ..io.resources import CDN_DIST
 from ..links import Callback
+from ..models.widgets import Button as _BkButton
+from ._mixin import TooltipMixin
 from .base import Widget
 
 if TYPE_CHECKING:
@@ -60,9 +60,9 @@ class _ButtonBase(Widget):
 
 class IconMixin(Widget):
 
-    icon = param.String(default='', doc="""
+    icon = param.String(default=None, doc="""
         An icon to render to the left of the button label. Either an SVG or an
-        icon name which is loaded from https://tabler-icons.io/.""")
+        icon name which is loaded from https://tabler-icons.io.""")
 
     icon_size = param.String(default='1em', doc="""
         Size of the icon as a string, e.g. 12px or 1em.""")
@@ -156,7 +156,7 @@ class _ClickButton(_ButtonBase, IconMixin):
         return Callback(self, code=callbacks, args=args)
 
 
-class Button(_ClickButton):
+class Button(_ClickButton, TooltipMixin):
     """
     The `Button` widget allows triggering events when the button is
     clicked.
@@ -171,7 +171,7 @@ class Button(_ClickButton):
 
     :Example:
 
-    >>> pn.widgets.Button(name='Click me', button_type='primary')
+    >>> pn.widgets.Button(name='Click me', icon='caret-right', button_type='primary')
     """
 
     clicks = param.Integer(default=0, doc="""
@@ -181,14 +181,24 @@ class Button(_ClickButton):
         Toggles from False to True while the event is being processed.""")
 
     _rename: ClassVar[Mapping[str, str | None]] = {
-        'clicks': None, 'name': 'label', 'value': None
+        **TooltipMixin._rename, 'clicks': None, 'name': 'label', 'value': None,
+    }
+
+    _source_transforms: ClassVar[Mapping[str, str | None]] = {
+        'button_style': None, 'description': None
     }
 
     _target_transforms: ClassVar[Mapping[str, str | None]] = {
-        'event:button_click': None, 'value': None
+        'event:button_click': None, 'value': None,
     }
 
     _widget_type: ClassVar[Type[Model]] = _BkButton
+
+    def __init__(self, **params):
+        click_handler = params.pop('on_click', None)
+        super().__init__(**params)
+        if click_handler:
+            self.on_click(click_handler)
 
     @property
     def _linkable_params(self) -> List[str]:
@@ -237,17 +247,26 @@ class Button(_ClickButton):
         self.clicks += 1
 
     def on_click(
-        self, callback: Callable[[param.parameterized.Event], None]
+        self, callback: Callable[[param.parameterized.Event], None | Awaitable[None]]
     ) -> param.parameterized.Watcher:
         """
         Register a callback to be executed when the `Button` is clicked.
 
         The callback is given an `Event` argument declaring the number of clicks
 
+        Example
+        -------
+
+        >>> button = pn.widgets.Button(name='Click me')
+        >>> def handle_click(event):
+        ...    print("I was clicked!")
+        >>> button.on_click(handle_click)
+
         Arguments
         ---------
-        callback: (Callable[[param.parameterized.Event], None])
-            The function to run on click events. Must accept a positional `Event` argument
+        callback:
+            The function to run on click events. Must accept a positional `Event` argument. Can
+            be a sync or async function
 
         Returns
         -------
@@ -318,6 +337,12 @@ class MenuButton(_ClickButton):
     _rename: ClassVar[Mapping[str, str | None]] = {'name': 'label', 'items': 'menu', 'clicked': None}
 
     _widget_type: ClassVar[Type[Model]] = _BkDropdown
+
+    def __init__(self, **params):
+        click_handler = params.pop('on_click', None)
+        super().__init__(**params)
+        if click_handler:
+            self.on_click(click_handler)
 
     def _get_model(
         self, doc: Document, root: Optional[Model] = None,

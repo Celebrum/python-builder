@@ -169,9 +169,9 @@ class PanelJupyterHandler(JupyterHandler):
                 raise TimeoutError('Timed out while waiting for kernel to open Comm channel to Panel application.')
             try:
                 msg = await ensure_async(self.kernel.iopub_channel.get_msg(timeout=None))
-            except Empty:
+            except Empty as e:
                 if not await ensure_async(self.kernel.is_alive()):
-                    raise RuntimeError("Kernel died before establishing Comm connection to Panel application.")
+                    raise RuntimeError("Kernel died before establishing Comm connection to Panel application.") from e
                 continue
             if msg['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -179,7 +179,7 @@ class PanelJupyterHandler(JupyterHandler):
             if msg_type == 'execute_result':
                 data = msg['content']['data']
                 if 'text/error' in data:
-                    raise RuntimeError("Panel application errored during startup.")
+                    raise RuntimeError(data['text/error'])
                 extension_dirs = data['application/bokeh-extensions']
                 result = data['text/html']
             elif msg_type == 'comm_open' and msg['content']['target_name'] == self.session_id:
@@ -381,9 +381,9 @@ class PanelWSProxy(WSHandler, JupyterHandler):
                 break
             try:
                 msg = await ensure_async(self.kernel.iopub_channel.get_msg(timeout=None))
-            except Empty:
+            except Empty as e:
                 if not await ensure_async(self.kernel.is_alive()):
-                    raise RuntimeError("Kernel died before expected shutdown of Panel app.")
+                    raise RuntimeError("Kernel died before expected shutdown of Panel app.") from e
                 continue
 
             msg_type = msg['header']['msg_type']
@@ -423,10 +423,10 @@ class PanelWSProxy(WSHandler, JupyterHandler):
         if self.session_id in state._kernels:
             del state._kernels[self.session_id]
         self._ping_job.stop()
-        reply = self.kernel.shutdown(reply=True)
-        future = self.kernel_manager.shutdown_kernel(self.kernel_id, now=True)
-        asyncio.ensure_future(reply)
-        asyncio.ensure_future(future)
+        self._shutdown_futures = [
+            asyncio.ensure_future(self.kernel.shutdown(reply=True)),
+            asyncio.ensure_future(self.kernel_manager.shutdown_kernel(self.kernel_id, now=True))
+        ]
         self.kernel = None
 
 

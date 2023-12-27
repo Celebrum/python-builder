@@ -18,9 +18,9 @@ except Exception:
 plotly_available = pytest.mark.skipif(hv_plotly is None, reason="requires plotly backend")
 
 from bokeh.models import (
-    Column as BkColumn, ColumnDataSource, GlyphRenderer, GridPlot, Line,
-    Row as BkRow, Scatter, Select as BkSelect, Slider as BkSlider,
-    Spacer as BkSpacer,
+    Column as BkColumn, ColumnDataSource, GlyphRenderer, GridPlot,
+    ImportedStyleSheet, Line, Row as BkRow, Scatter, Select as BkSelect,
+    Slider as BkSlider, Spacer as BkSpacer,
 )
 from bokeh.plotting import figure
 
@@ -30,8 +30,11 @@ from panel.depends import bind
 from panel.layout import (
     Column, FlexBox, HSpacer, Row,
 )
-from panel.pane import HoloViews, PaneBase, panel
+from panel.pane import (
+    HoloViews, PaneBase, Plotly, panel,
+)
 from panel.tests.util import hv_available, mpl_available
+from panel.theme import Native
 from panel.util.warnings import PanelDeprecationWarning
 from panel.widgets import (
     Checkbox, DiscreteSlider, FloatSlider, Select,
@@ -170,7 +173,7 @@ def test_holoviews_pane_reflect_responsive_override(document, comm):
     # Create pane
     row = pane.get_root(document, comm=comm)
 
-    assert row.sizing_mode is None
+    assert row.sizing_mode == 'stretch_both'
     assert pane.sizing_mode == 'fixed'
 
     # Unset override
@@ -224,6 +227,25 @@ def test_holoviews_pane_reflect_responsive_plotly(document, comm):
 
     assert row.sizing_mode is None
     assert pane.sizing_mode is None
+
+
+@hv_available
+@plotly_available
+def test_holoviews_pane_inherits_design_stylesheets(document, comm):
+    curve = hv.Curve([1, 2, 3]).opts(responsive=True, backend='plotly')
+    pane = HoloViews(curve, backend='plotly')
+
+
+    # Create pane
+    row = pane.get_root(document, comm=comm)
+
+    Native().apply(pane, row)
+
+    plotly_model = row.children[0]
+
+    assert len(plotly_model.stylesheets) == 6
+    stylesheets = [st.url for st in plotly_model.stylesheets if isinstance(st, ImportedStyleSheet)]
+    assert all(st in stylesheets for st in Plotly._stylesheets)
 
 @hv_available
 def test_holoviews_widgets_from_dynamicmap(document, comm):
@@ -283,7 +305,7 @@ def test_holoviews_with_widgets(document, comm):
 
     hv_pane = HoloViews(hmap)
     layout = hv_pane.get_root(document, comm)
-    model = layout.children[0].children[0]
+    model = layout.children[0]
     assert len(hv_pane.widget_box.objects) == 2
     assert hv_pane.widget_box.objects[0].name == 'X'
     assert hv_pane.widget_box.objects[1].name == 'Y'
@@ -306,12 +328,13 @@ def test_holoviews_updates_widgets(document, comm):
 
     hv_pane.widgets = {'X': Select}
     assert isinstance(hv_pane.widget_box[0], Select)
-    assert isinstance(layout.children[0].children[1].children[0], BkSelect)
+    assert isinstance(layout.children[1].children[1], BkSelect)
 
     hv_pane.widgets = {'X': DiscreteSlider}
     assert isinstance(hv_pane.widget_box[0], DiscreteSlider)
-    assert isinstance(layout.children[0].children[1].children[0], BkColumn)
-    assert isinstance(layout.children[0].children[1].children[0].children[1], BkSlider)
+    assert isinstance(layout.children[1].children[0], BkColumn)
+    assert isinstance(layout.children[1].children[0].children[1], BkSlider)
+
 
 @hv_available
 def test_holoviews_widgets_update_plot(document, comm):
@@ -325,6 +348,23 @@ def test_holoviews_widgets_update_plot(document, comm):
     hv_pane.widget_box[0].value = 1
     hv_pane.widget_box[1].value = chr(65+1)
     assert cds.data['y'] == np.array([1])
+
+
+@hv_available
+def test_holoviews_dynamic_widgets_with_unit_updates_plot(document, comm):
+    def function(f):
+        return hv.Curve((x, np.sin(f*x)))
+
+    x = np.linspace(0, 10)
+    factor = hv.Dimension('factor', unit='m', values=[1, 2, 3, 4, 5])
+    dmap = hv.DynamicMap(function, kdims=factor)
+    hv_pane = HoloViews(dmap, backend='bokeh')
+    layout = hv_pane.get_root(document, comm)
+
+    cds = layout.children[0].select_one({'type': ColumnDataSource})
+    np.testing.assert_array_equal(cds.data['y'], np.sin(x))
+    hv_pane.widget_box[0].value = 3
+    np.testing.assert_array_equal(cds.data['y'], np.sin(3*x))
 
 
 @hv_available
@@ -395,13 +435,13 @@ def test_holoviews_layouts(document, comm):
                     wmodel, hv_model = cmodel.children[1],  cmodel.children[0]
             else:
                 if loc.startswith('left'):
-                    assert len(layout) == 1
-                    widgets, hv_obj = layout[0]
-                    wmodel, hv_model = model.children[0].children
+                    assert len(layout) == 2
+                    widgets, hv_obj = layout
+                    wmodel, hv_model = model.children
                 elif loc.startswith('right'):
-                    assert len(layout) == 1
-                    hv_obj, widgets = layout[0]
-                    hv_model, wmodel = model.children[0].children
+                    assert len(layout) == 2
+                    hv_obj, widgets = layout
+                    hv_model, wmodel = model.children
                 elif loc.startswith('top'):
                     assert len(layout) == 1
                     col = layout[0]

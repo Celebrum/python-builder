@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest.mock
 
 from functools import partial
@@ -15,10 +16,11 @@ from bokeh.models import Div
 
 from panel.depends import bind, depends
 from panel.layout import Tabs, WidgetBox
+from panel.pane import Markdown
 from panel.reactive import Reactive, ReactiveHTML
 from panel.viewable import Viewable
 from panel.widgets import (
-    Checkbox, IntInput, StaticText, TextInput,
+    Checkbox, IntInput, IntSlider, StaticText, TextInput,
 )
 
 
@@ -162,7 +164,6 @@ def test_text_input_controls():
     assert not len(params1 - params2)
     assert not len(params2 - params1)
 
-
 def test_pass_widget_by_reference():
     int_input = IntInput(start=0, end=400, value=42)
     text_input = TextInput(width=int_input)
@@ -172,7 +173,6 @@ def test_pass_widget_by_reference():
     int_input.value = 101
 
     assert text_input.width == 101
-
 
 def test_pass_param_by_reference():
     int_input = IntInput(start=0, end=400, value=42)
@@ -184,7 +184,6 @@ def test_pass_param_by_reference():
 
     assert text_input.width == 101
 
-
 def test_pass_bind_function_by_reference():
     int_input = IntInput(start=0, end=400, value=42)
     fn = bind(lambda v: v + 10, int_input)
@@ -195,6 +194,132 @@ def test_pass_bind_function_by_reference():
     int_input.value = 101
 
     assert text_input.width == 111
+
+@pytest.mark.asyncio
+async def test_pass_bind_async_func_by_reference():
+    int_input = IntInput(start=0, end=400, value=42)
+
+    async def gen(v):
+        return v + 10
+
+    text_input = TextInput(width=bind(gen, int_input))
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 52
+
+    int_input.value = 101
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 111
+
+@pytest.mark.asyncio
+async def test_pass_bind_async_generator_by_reference():
+    int_input = IntInput(start=0, end=400, value=42)
+
+    async def gen(v):
+        yield v + 10
+
+    text_input = TextInput(width=bind(gen, int_input))
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 52
+
+    int_input.value = 101
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 111
+
+@pytest.mark.asyncio
+async def test_pass_bind_multi_async_generator_by_reference():
+    int_input = IntInput(start=0, end=400, value=42)
+
+    async def gen(v):
+        yield v + 10
+        yield v + 20
+
+    text_input = TextInput(width=bind(gen, int_input))
+
+    widths = []
+    text_input.param.watch(lambda e: widths.append(e.new), 'width')
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 62
+
+    int_input.value = 101
+
+    await asyncio.sleep(0.01)
+    assert widths == [52, 62, 111, 121]
+    assert text_input.width == 121
+
+
+def test_pass_refs():
+    slider = IntSlider(value=5, start=1, end=10, name='Number')
+    size = IntSlider(value=12, start=6, end=24, name='Size')
+
+    def refs(number, size):
+        return {
+            'object': '*' * number,
+            'styles': {'font-size': f'{size}pt'}
+        }
+
+    irefs = bind(refs, slider, size)
+
+    md = Markdown(refs=irefs)
+
+    assert md.object == '*****'
+    assert md.styles == {'font-size': '12pt'}
+
+    slider.value = 3
+    assert md.object == '***'
+
+    size.value = 7
+    assert md.styles == {'font-size': '7pt'}
+
+
+@pytest.mark.asyncio
+async def test_pass_refs_async():
+    async def refs():
+        yield {
+            'object': '*****',
+            'styles': {'font-size': '12pt'}
+        }
+        await asyncio.sleep(0.1)
+        yield {
+            'object': '***',
+            'styles': {'font-size': '7pt'}
+        }
+
+    md = Markdown(refs=refs)
+
+    await asyncio.sleep(0.01)
+
+    assert md.object == '*****'
+    assert md.styles == {'font-size': '12pt'}
+
+    await asyncio.sleep(0.1)
+
+    assert md.object == '***'
+    assert md.styles == {'font-size': '7pt'}
+
+
+@pytest.mark.asyncio
+async def test_pass_bind_multi_async_generator_by_reference_and_abort():
+    int_input = IntInput(start=0, end=400, value=42)
+
+    async def gen(v):
+        yield v + 10
+        await asyncio.sleep(0.1)
+        yield v + 20
+
+    text_input = TextInput(width=bind(gen, int_input))
+
+    await asyncio.sleep(0.01)
+    assert text_input.width == 52
+    int_input.value = 101
+    await asyncio.sleep(0.01)
+    assert text_input.width == 111
+    await asyncio.sleep(0.1)
+    assert text_input.width == 121
 
 def test_pass_parameterized_method_by_reference():
 

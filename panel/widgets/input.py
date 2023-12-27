@@ -10,7 +10,7 @@ import json
 from base64 import b64decode
 from datetime import date, datetime
 from typing import (
-    TYPE_CHECKING, Any, ClassVar, Dict, Mapping, Optional, Type,
+    TYPE_CHECKING, Any, ClassVar, Dict, Mapping, Optional, Tuple, Type,
 )
 
 import numpy as np
@@ -19,15 +19,17 @@ import param
 from bokeh.models.formatters import TickFormatter
 from bokeh.models.widgets import (
     Checkbox as _BkCheckbox, ColorPicker as _BkColorPicker,
-    DatePicker as _BkDatePicker, Div as _BkDiv, FileInput as _BkFileInput,
-    NumericInput as _BkNumericInput, PasswordInput as _BkPasswordInput,
-    Spinner as _BkSpinner, Switch as _BkSwitch,
-    TextAreaInput as _BkTextAreaInput, TextInput as _BkTextInput,
+    DatePicker as _BkDatePicker, DateRangePicker as _BkDateRangePicker,
+    Div as _BkDiv, FileInput as _BkFileInput, NumericInput as _BkNumericInput,
+    PasswordInput as _BkPasswordInput, Spinner as _BkSpinner,
+    Switch as _BkSwitch, TextInput as _BkTextInput,
 )
 
 from ..config import config
 from ..layout import Column, Panel
-from ..models import DatetimePicker as _bkDatetimePicker
+from ..models import (
+    DatetimePicker as _bkDatetimePicker, TextAreaInput as _bkTextAreaInput,
+)
 from ..util import param_reprs
 from .base import CompositeWidget, Widget
 
@@ -126,7 +128,25 @@ class TextAreaInput(TextInput):
     ... )
     """
 
-    _widget_type: ClassVar[Type[Model]] = _BkTextAreaInput
+    auto_grow = param.Boolean(default=False, doc="""
+        Whether the text area should automatically grow vertically to
+        accommodate the current text.""")
+
+    cols = param.Integer(default=20, doc="""
+        Number of columns in the text input field.""")
+
+    max_rows = param.Integer(default=None, doc="""
+        When combined with auto_grow this determines the maximum number
+        of rows the input area can grow.""")
+
+    rows = param.Integer(default=2, doc="""
+        Number of rows in the text input field.""")
+
+    resizable = param.ObjectSelector(objects=["both", "width", "height", False], doc="""
+        Whether the layout is interactively resizable,
+        and if so in which dimensions: `width`, `height`, or `both`.""")
+
+    _widget_type: ClassVar[Type[Model]] = _bkTextAreaInput
 
 
 class FileInput(Widget):
@@ -271,7 +291,7 @@ class StaticText(Widget):
 
 class DatePicker(Widget):
     """
-    The `DatePicker` allows selecting selecting a `date` value using a text box
+    The `DatePicker` allows selecting a `date` value using a text box
     and a date-picking utility.
 
     Reference: https://panel.holoviz.org/reference/widgets/DatePicker.html
@@ -322,6 +342,88 @@ class DatePicker(Widget):
             if isinstance(value, str):
                 msg[p] = datetime.date(datetime.strptime(value, '%Y-%m-%d'))
         return msg
+
+
+class DateRangePicker(Widget):
+    """
+    The `DateRangePicker` allows selecting a `date` range using a text box
+    and a date-picking utility.
+
+    Reference: https://panel.holoviz.org/reference/widgets/DateRangePicker.html
+
+    :Example:
+
+    >>> DateRangePicker(
+    ...     value=(date(2025,1,1), date(2025,1,5)),
+    ...     start=date(2025,1,1), end=date(2025,12,31),
+    ...     name='Date range'
+    ... )
+    """
+
+    value = param.DateRange(default=None, doc="""
+        The current value""")
+
+    start = param.CalendarDate(default=None, doc="""
+        Inclusive lower bound of the allowed date selection""")
+
+    end = param.CalendarDate(default=None, doc="""
+        Inclusive upper bound of the allowed date selection""")
+
+    disabled_dates = param.List(default=None, item_type=(date, str))
+
+    enabled_dates = param.List(default=None, item_type=(date, str))
+
+    width = param.Integer(default=300, allow_None=True, doc="""
+      Width of this component. If sizing_mode is set to stretch
+      or scale mode this will merely be used as a suggestion.""")
+
+    description = param.String(default=None, doc="""
+        An HTML string describing the function of this component.""")
+
+    _source_transforms: ClassVar[Mapping[str, str | None]] = {}
+
+    _rename: ClassVar[Mapping[str, str | None]] = {
+        'start': 'min_date', 'end': 'max_date'
+    }
+
+    _widget_type: ClassVar[Type[Model]] = _BkDateRangePicker
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self._update_value_bounds()
+
+    @param.depends('start', 'end', watch=True)
+    def _update_value_bounds(self):
+        self.param.value.bounds = (self.start, self.end)
+        self.param.value._validate(self.value)
+
+    def _process_property_change(self, msg):
+        msg = super()._process_property_change(msg)
+        for p in ('start', 'end', 'value'):
+            if p not in msg:
+                continue
+            value = msg[p]
+            if isinstance(value, tuple):
+                msg[p] = tuple(self._convert_string_to_date(v) for v in value)
+        return msg
+
+    def _process_param_change(self, msg):
+        msg = super()._process_param_change(msg)
+        if 'value' in msg:
+            msg['value'] = tuple(self._convert_date_to_string(v) for v in msg['value'])
+        if 'min_date' in msg:
+            msg['min_date'] = self._convert_date_to_string(msg['min_date'])
+        if 'max_date' in msg:
+            msg['max_date'] = self._convert_date_to_string(msg['max_date'])
+        return msg
+
+    @staticmethod
+    def _convert_string_to_date(v):
+        return datetime.strptime(v, '%Y-%m-%d').date()
+
+    @staticmethod
+    def _convert_date_to_string(v):
+        return v.strftime('%Y-%m-%d')
 
 
 class _DatetimePickerBase(Widget):
@@ -580,6 +682,8 @@ class _SpinnerBase(_NumericInputBase):
       Width of this component. If sizing_mode is set to stretch
       or scale mode this will merely be used as a suggestion.""")
 
+    _rename: ClassVar[Mapping[str, str | None]] = {'value_throttled': None}
+
     _widget_type: ClassVar[Type[Model]] = _BkSpinner
 
     __abstract = True
@@ -596,6 +700,10 @@ class _SpinnerBase(_NumericInputBase):
     def __repr__(self, depth=0):
         return '{cls}({params})'.format(cls=type(self).__name__,
                                         params=', '.join(param_reprs(self, ['value_throttled'])))
+
+    @property
+    def _linked_properties(self) -> Tuple[str]:
+        return super()._linked_properties + ('value_throttled',)
 
     def _update_model(
         self, events: Dict[str, param.parameterized.Event], msg: Dict[str, Any],
@@ -643,6 +751,8 @@ class IntInput(_SpinnerBase, _IntInputBase):
     value_throttled = param.Integer(default=None, constant=True, doc="""
         The current value. Updates only on `<enter>` or when the widget looses focus.""")
 
+    _rename: ClassVar[Mapping[str, str | None]] = {'start': 'low', 'end': 'high'}
+
 
 class FloatInput(_SpinnerBase, _FloatInputBase):
     """
@@ -668,6 +778,8 @@ class FloatInput(_SpinnerBase, _FloatInputBase):
 
     value_throttled = param.Number(default=None, constant=True, doc="""
         The current value. Updates only on `<enter>` or when the widget looses focus.""")
+
+    _rename: ClassVar[Mapping[str, str | None]] = {'start': 'low', 'end': 'high'}
 
     def _process_param_change(self, msg):
         if msg.get('value', False) is None:

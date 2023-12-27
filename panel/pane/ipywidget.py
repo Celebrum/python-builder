@@ -8,6 +8,7 @@ from typing import (
 
 import param
 
+from param.parameterized import register_reference_transform
 from pyviz_comms import JupyterComm
 
 from ..config import config
@@ -36,11 +37,18 @@ class IPyWidget(PaneBase):
     >>> IPyWidget(some_ipywidget)
     """
 
+    object = param.Parameter(default=None, allow_refs=False, doc="""
+        The IPywidget being wrapped, which will be converted to a
+        Bokeh model.""")
+
     priority: ClassVar[float | bool | None] = 0.6
 
     @classmethod
     def applies(cls, obj: Any) -> float | bool | None:
-        return (hasattr(obj, 'traits') and hasattr(obj, 'get_manager_state') and hasattr(obj, 'comm'))
+        try:
+            return (hasattr(obj, 'traits') and hasattr(obj, 'get_manager_state') and hasattr(obj, 'comm'))
+        except Exception:
+            return False
 
     def _resolve_ref(self, pname, value):
         if pname == 'object' and self.applies(value):
@@ -115,3 +123,25 @@ class Reacton(IPyWidget):
         widget, rc = reacton.render(obj)
         self._rcs[root.ref['id']] = rc
         return super()._get_ipywidget(widget, doc, root, comm, **kwargs)
+
+
+_ipywidget_classes = {}
+
+def _ipywidget_transform(obj):
+    """
+    Transforms an ipywidget into a Parameter that listens updates
+    when the ipywidget updates.
+    """
+    if not (IPyWidget.applies(obj) and hasattr(obj, 'value')):
+        return obj
+    name = type(obj).__name__
+    if name in _ipywidget_classes:
+        ipy_param = _ipywidget_classes[name]
+    else:
+        ipy_param = param.parameterized_class(name, {'value': param.Parameter()})
+    _ipywidget_classes[name] = ipy_param
+    ipy_inst = ipy_param(value=obj.value)
+    obj.observe(lambda event: ipy_inst.param.update(value=event['new']), 'value')
+    return ipy_inst.param.value
+
+register_reference_transform(_ipywidget_transform)

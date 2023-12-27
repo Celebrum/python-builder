@@ -70,9 +70,12 @@ def push(doc: 'Document', comm: 'Comm', binary: bool = True) -> None:
     msg = diff(doc, binary=binary)
     if msg is None:
         return
+    # WARNING: CommManager model assumes that either JSON content OR a buffer
+    #          is sent. Therefore we must NEVER(!!!) send both at once.
     comm.send(msg.header_json)
     comm.send(msg.metadata_json)
     comm.send(msg.content_json)
+
     for buffer in msg.buffers:
         header = json.dumps(buffer.ref)
         payload = buffer.to_bytes()
@@ -194,6 +197,18 @@ def render_model(
     data = {'text/html': html, 'application/javascript': bokeh_script}
     return ({'text/html': mimebundle_to_html(data), EXEC_MIME: ''},
             {EXEC_MIME: {'id': target}})
+
+
+def mime_renderer(obj):
+    """
+    Generates a function that will render the supplied object as a
+    mimebundle, e.g. to monkey-patch a _repr_mimebundle_ method onto
+    an existing object.
+    """
+    from ..pane import panel
+    def _repr_mimebundle_(include=None, exclude=None):
+        return panel(obj)._repr_mimebundle_(include, exclude)
+    return _repr_mimebundle_
 
 
 def render_mimebundle(

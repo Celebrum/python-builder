@@ -14,6 +14,7 @@ from typing import (
 )
 
 import bokeh
+import js
 import param
 
 import pyodide # isort: split
@@ -32,7 +33,7 @@ from bokeh.settings import settings as bk_settings
 from bokeh.util.sampledata import (
     __file__ as _bk_util_dir, _download_file, external_data_dir, splitext,
 )
-from js import JSON, Object, XMLHttpRequest
+from js import JSON, XMLHttpRequest
 
 from ..config import config
 from ..util import edit_readonly, isurl
@@ -48,15 +49,28 @@ os.environ['BOKEH_RESOURCES'] = 'cdn'
 try:
     from js import document as js_document  # noqa
     _IN_WORKER = False
+    _IN_PYSCRIPT_WORKER = False
 except Exception:
+    try:
+        # PyScript Next Worker support
+        from pyscript import RUNNING_IN_WORKER as _IN_PYSCRIPT_WORKER
+        if _IN_PYSCRIPT_WORKER:
+            from pyscript import document, window
+            js.document = document
+            js.Bokeh = window.Bokeh
+    except Exception:
+        _IN_PYSCRIPT_WORKER = False
     _IN_WORKER = True
+
+# Ensure we don't try to load MPL WASM backend in worker
+if _IN_WORKER:
+    os.environ['MPLBACKEND'] = 'agg'
 
 try:
     import pyodide_http
     pyodide_http.patch_all()
 except Exception:
     pyodide_http = None
-    pass
 
 try:
     # Patch fsspec with synchronous http support
@@ -223,6 +237,18 @@ def _process_document_events(doc: Document, events: List[Any]):
     patch_json = _serialize_buffers(patch_json, buffers=buffer_map)
     return patch_json, buffer_map
 
+# JS function to convert undefined -> null (workaround for https://github.com/pyodide/pyodide/issues/3968)
+_dict_converter = pyodide.code.run_js("""
+((entries) => {
+  for (let entry of entries) {
+    if (entry[1] === undefined) {
+      entry[1] = null;
+    }
+  }
+  return Object.fromEntries(entries);
+})
+""")
+
 def _link_docs(pydoc: Document, jsdoc: Any) -> None:
     """
     Links Python and JS documents in Pyodide ensuring that messages
@@ -249,13 +275,17 @@ def _link_docs(pydoc: Document, jsdoc: Any) -> None:
         if setter is not None and setter == 'js':
             return
         json_patch, buffer_map = _process_document_events(pydoc, [event])
-        json_patch = pyodide.ffi.to_js(json_patch, dict_converter=Object.fromEntries)
+        json_patch = pyodide.ffi.to_js(json_patch, dict_converter=_dict_converter)
         buffer_map = pyodide.ffi.to_js(buffer_map)
         jsdoc.apply_json_patch(json_patch, buffer_map)
 
     pydoc.on_change(pysync)
-    pydoc.unhold()
-    pydoc.callbacks.trigger_event(DocumentReady())
+
+    try:
+        pydoc.unhold()
+        pydoc.callbacks.trigger_event(DocumentReady())
+    except Exception as e:
+        print(f'Error raised while processing Document events: {e}')  # noqa: T201
 
 def _link_docs_worker(doc: Document, dispatch_fn: Any, msg_id: str | None = None, setter: str | None = None):
     """
@@ -278,7 +308,7 @@ def _link_docs_worker(doc: Document, dispatch_fn: Any, msg_id: str | None = None
         if setter is not None and getattr(event, 'setter', None) == setter:
             return
         json_patch, buffer_map = _process_document_events(doc, [event])
-        json_patch = pyodide.ffi.to_js(json_patch, dict_converter=Object.fromEntries)
+        json_patch = pyodide.ffi.to_js(json_patch, dict_converter=_dict_converter)
         dispatch_fn(json_patch, pyodide.ffi.to_js(buffer_map), msg_id)
 
     doc.on_change(pysync)
@@ -297,13 +327,12 @@ async def _link_model(ref: str, doc: Document) -> None:
     doc: bokeh.document.Document
         The bokeh Document to sync the rendered Model with.
     """
-    from js import Bokeh
-    rendered = Bokeh.index.object_keys()
+    rendered = js.Bokeh.index.object_keys()
     if ref not in rendered:
         await asyncio.sleep(0.1)
         await _link_model(ref, doc)
         return
-    views = Bokeh.index.object_values()
+    views = js.Bokeh.index.object_values()
     view = views[rendered.indexOf(ref)]
     _link_docs(doc, view.model.document)
 
@@ -427,14 +456,11 @@ async def write(target: str, obj: Any) -> None:
     obj: Viewable
         Object to render into the DOM node
     """
-
-    from js import Bokeh
-
     from ..pane import panel as as_panel
 
     obj = as_panel(obj)
     pydoc, model_json = _model_json(obj, target)
-    views = await Bokeh.embed.embed_item(JSON.parse(model_json))
+    views = await js.Bokeh.embed.embed_item(JSON.parse(model_json))
     jsdoc = list(views.roots)[0].model.document
     _link_docs(pydoc, jsdoc)
     pydoc.unhold()
@@ -446,7 +472,7 @@ def hide_loader() -> None:
     from js import document
 
     body = document.getElementsByTagName('body')[0]
-    body.classList.remove(LOADING_INDICATOR_CSS_CLASS, config.loading_spinner)
+    body.classList.remove(LOADING_INDICATOR_CSS_CLASS, f'pn-{config.loading_spinner}')
 
 def sync_location():
     """
@@ -489,8 +515,7 @@ async def write_doc(doc: Document | None = None) -> Tuple[str, str, str]:
 
     # Test whether we have access to DOM
     try:
-        from js import Bokeh, document
-        root_els = document.querySelectorAll('[data-root-id]')
+        root_els = js.document.querySelectorAll('[data-root-id]')
         for el in root_els:
             el.innerHTML = ''
     except Exception:
@@ -500,7 +525,7 @@ async def write_doc(doc: Document | None = None) -> Tuple[str, str, str]:
 
     # If we have DOM access render and sync the document
     if root_els is not None:
-        views = await Bokeh.embed.embed_items(JSON.parse(docs_json), JSON.parse(render_items))
+        views = await js.Bokeh.embed.embed_items(JSON.parse(docs_json), JSON.parse(render_items))
         jsdoc = list(views[0].roots)[0].model.document
         _link_docs(pydoc, jsdoc)
         sync_location()
@@ -533,7 +558,9 @@ def pyrender(
     Returns an JS Map containing the content, mime_type, stdout and stderr.
     """
     from ..pane import HoloViews, Interactive, panel as as_panel
+    from ..param import ReactiveExpr
     from ..viewable import Viewable, Viewer
+    PANES = (HoloViews, Interactive, ReactiveExpr)
     kwargs = {}
     if stdout_callback:
         kwargs['stdout'] = WriteCallbackStream(stdout_callback)
@@ -541,7 +568,7 @@ def pyrender(
         kwargs['stderr'] = WriteCallbackStream(stderr_callback)
     out = exec_with_return(code, **kwargs)
     ret = {}
-    if isinstance(out, (Model, Viewable, Viewer)) or HoloViews.applies(out) or Interactive.applies(out):
+    if isinstance(out, (Model, Viewable, Viewer)) or any(pane.applies(out) for pane in PANES):
         doc, model_json = _model_json(as_panel(out), target)
         state.cache[target] = doc
         ret['content'], ret['mime_type'] = model_json, 'application/bokeh'

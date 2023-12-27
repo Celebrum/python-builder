@@ -7,7 +7,7 @@ import pathlib
 import uuid
 
 from typing import (
-    IO, Any, Dict, List,
+    IO, Any, Dict, List, Literal,
 )
 
 import bokeh
@@ -21,15 +21,14 @@ from bokeh.embed.elements import script_for_render_items
 from bokeh.embed.util import RenderItem, standalone_docs_json_and_render_items
 from bokeh.embed.wrappers import wrap_in_script_tag
 from bokeh.util.serialization import make_id
-from typing_extensions import Literal
 
 from .. import __version__, config
 from ..util import base_version, escape
 from .loading import LOADING_INDICATOR_CSS_CLASS
 from .markdown import build_single_handler_application
-from .mime_render import find_imports
+from .mime_render import find_requirements
 from .resources import (
-    BASE_TEMPLATE, CDN_DIST, DIST_DIR, INDEX_TEMPLATE, Resources,
+    BASE_TEMPLATE, CDN_DIST, CDN_ROOT, DIST_DIR, INDEX_TEMPLATE, Resources,
     _env as _pn_env, bundle_resources, loading_css, set_resource_mode,
 )
 from .state import set_curdoc, state
@@ -42,14 +41,19 @@ WORKER_HANDLER_TEMPLATE  = _pn_env.get_template('pyodide_handler.js')
 PANEL_ROOT = pathlib.Path(__file__).parent.parent
 BOKEH_VERSION = base_version(bokeh.__version__)
 PY_VERSION = base_version(__version__)
+PYODIDE_VERSION = 'v0.24.1'
+PYSCRIPT_VERSION = '2023.05.1'
 PANEL_LOCAL_WHL = DIST_DIR / 'wheels' / f'panel-{__version__.replace("-dirty", "")}-py3-none-any.whl'
 BOKEH_LOCAL_WHL = DIST_DIR / 'wheels' / f'bokeh-{BOKEH_VERSION}-py3-none-any.whl'
 PANEL_CDN_WHL = f'{CDN_DIST}wheels/panel-{PY_VERSION}-py3-none-any.whl'
-BOKEH_CDN_WHL = f'{CDN_DIST}wheels/bokeh-{BOKEH_VERSION}-py3-none-any.whl'
-PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.23.0/full/pyodide.js'
-PYSCRIPT_CSS = '<link rel="stylesheet" href="https://pyscript.net/releases/2022.12.1/pyscript.css" />'
-PYSCRIPT_JS = '<script defer src="https://pyscript.net/releases/2022.12.1/pyscript.js"></script>'
+BOKEH_CDN_WHL = f'{CDN_ROOT}wheels/bokeh-{BOKEH_VERSION}-py3-none-any.whl'
+PYODIDE_URL = f'https://cdn.jsdelivr.net/pyodide/{PYODIDE_VERSION}/full/pyodide.js'
+PYODIDE_PYC_URL = f'https://cdn.jsdelivr.net/pyodide/{PYODIDE_VERSION}/pyc/pyodide.js'
+PYSCRIPT_CSS = f'<link rel="stylesheet" href="https://pyscript.net/releases/{PYSCRIPT_VERSION}/pyscript.css" />'
+PYSCRIPT_CSS_OVERRIDES = f'<link rel="stylsheet" href="{CDN_DIST}css/pyscript.css" />'
+PYSCRIPT_JS = f'<script defer src="https://pyscript.net/releases/{PYSCRIPT_VERSION}/pyscript.js"></script>'
 PYODIDE_JS = f'<script src="{PYODIDE_URL}"></script>'
+PYODIDE_PYC_JS = f'<script src="{PYODIDE_PYC_URL}"></script>'
 
 MINIMUM_VERSIONS = {}
 
@@ -171,13 +175,14 @@ def script_to_html(
     filename: str | os.PathLike | IO,
     requirements: Literal['auto'] | List[str] = 'auto',
     js_resources: Literal['auto'] | List[str] = 'auto',
-    css_resources: Literal['auto'] | List[str] | None = None,
+    css_resources: Literal['auto'] | List[str] | None = 'auto',
     runtime: Runtimes = 'pyodide',
     prerender: bool = True,
     panel_version: Literal['auto', 'local'] | str = 'auto',
     manifest: str | None = None,
     http_patch: bool = True,
-    inline: bool = False
+    inline: bool = False,
+    compiled: bool = True
 ) -> str:
     """
     Converts a Panel or Bokeh script to a standalone WASM Python
@@ -204,6 +209,8 @@ def script_to_html(
         to allow urllib3 and requests to work.
     inline: bool
         Whether to inline resources.
+    compiled: bool
+        Whether to use pre-compiled pyodide bundles.
     """
     # Run script
     if hasattr(filename, 'read'):
@@ -229,9 +236,9 @@ def script_to_html(
         )
 
     if requirements == 'auto':
-        requirements = find_imports(source)
+        requirements = find_requirements(source)
     elif isinstance(requirements, str) and pathlib.Path(requirements).is_file():
-        requirements = pathlib.Path(requirements).read_text(encoding='utf-8').split('/n')
+        requirements = pathlib.Path(requirements).read_text(encoding='utf-8').splitlines()
         try:
             from packaging.requirements import Requirement
             requirements = [
@@ -241,7 +248,7 @@ def script_to_html(
         except Exception as e:
             raise ValueError(
                 f'Requirements parser raised following error: {e}'
-            )
+            ) from e
 
     # Environment
     if panel_version == 'local':
@@ -272,9 +279,10 @@ def script_to_html(
     if runtime == 'pyscript':
         if js_resources == 'auto':
             js_resources = [PYSCRIPT_JS]
-        css_resources = []
         if css_resources == 'auto':
-            css_resources = [PYSCRIPT_CSS]
+            css_resources = [PYSCRIPT_CSS, PYSCRIPT_CSS_OVERRIDES]
+        elif not css_resources:
+            css_resources = []
         pyenv = ','.join([repr(req) for req in reqs])
         plot_script = f'<py-config>\npackages = [{pyenv}]\n</py-config>\n<py-script>{code}</py-script>'
     else:
@@ -290,14 +298,14 @@ def script_to_html(
                 'loading_spinner': config.loading_spinner
             })
             web_worker = WEB_WORKER_TEMPLATE.render({
-                'PYODIDE_URL': PYODIDE_URL,
+                'PYODIDE_URL': PYODIDE_PYC_URL if compiled else PYODIDE_URL,
                 'env_spec': env_spec,
                 'code': code
             })
             plot_script = wrap_in_script_tag(worker_handler)
         else:
             if js_resources == 'auto':
-                js_resources = [PYODIDE_JS]
+                js_resources = [PYODIDE_PYC_JS if compiled else PYODIDE_JS]
             script_template = _pn_env.from_string(PYODIDE_SCRIPT)
             plot_script = script_template.render({
                 'env_spec': env_spec,
@@ -321,10 +329,11 @@ def script_to_html(
 
     # Collect resources
     resources = Resources(mode='inline' if inline else 'cdn')
-    loading_base = (DIST_DIR / "css" / "loading.css").read_text(encoding='utf-8')
-    spinner_css = loading_css()
+    spinner_css = loading_css(
+        config.loading_spinner, config.loading_color, config.loading_max_height
+    )
     css_resources.append(
-        f'<style type="text/css">\n{loading_base}\n{spinner_css}\n</style>'
+        f'<style type="text/css">\n{spinner_css}\n</style>'
     )
     with set_curdoc(document):
         bokeh_js, bokeh_css = bundle_resources(document.roots, resources)
@@ -372,6 +381,7 @@ def convert_app(
     panel_version: Literal['auto', 'local'] | str = 'auto',
     http_patch: bool = True,
     inline: bool = False,
+    compiled: bool = False,
     verbose: bool = True,
 ):
     if dest_path is None:
@@ -385,7 +395,7 @@ def convert_app(
                 app, requirements=requirements, runtime=runtime,
                 prerender=prerender, manifest=manifest,
                 panel_version=panel_version, http_patch=http_patch,
-                inline=inline
+                inline=inline, compiled=compiled
             )
     except KeyboardInterrupt:
         return
@@ -453,6 +463,7 @@ def convert_apps(
     panel_version: Literal['auto', 'local'] | str = 'auto',
     http_patch: bool = True,
     inline: bool = False,
+    compiled: bool = False,
     verbose: bool = True,
 ):
     """
@@ -494,6 +505,8 @@ def convert_apps(
         to allow urllib3 and requests to work.
     inline: bool
         Whether to inline resources.
+    compiled: bool
+        Whether to use the compiled and faster version of Pyodide.
     """
     if isinstance(apps, str):
         apps = [apps]
@@ -520,7 +533,7 @@ def convert_apps(
         'requirements': app_requirements, 'runtime': runtime,
         'prerender': prerender, 'manifest': manifest,
         'panel_version': panel_version, 'http_patch': http_patch,
-        'inline': inline, 'verbose': verbose
+        'inline': inline, 'verbose': verbose, 'compiled': compiled
     }
 
     if state._is_pyodide:

@@ -94,13 +94,20 @@ class FloatPanel(ListLike, ReactiveHTML):
           contentSize: `${model.width} ${model.height}`,
           onstatuschange: function() {
             data.status = this.status
-          }
+          },
+          onbeforeclose: function() {
+           data.status = 'closed'
+           return true
+          },
         }
         if (data.contained) {
           config.container = view.container
         }
         config = {...config, ...data.config}
         state.panel = jsPanel.create(config);
+        if (data.status !== 'normalized') {
+           view.run_script('status')
+        }
         """,
         "name": "state.panel.setHeaderTitle(data.name)",
         "status": """
@@ -189,3 +196,23 @@ class FloatPanel(ListLike, ReactiveHTML):
 
     def __init__(self, *objects, name='', **params):
         super().__init__(objects=list(objects), name=name, **params)
+
+    def select(self, selector=None):
+        """
+        Iterates over the Viewable and any potential children in the
+        applying the Selector.
+
+        Arguments
+        ---------
+        selector: type or callable or None
+          The selector allows selecting a subset of Viewables by
+          declaring a type or callable function to filter by.
+
+        Returns
+        -------
+        viewables: list(Viewable)
+        """
+        objects = super().select(selector)
+        for obj in self:
+            objects += obj.select(selector)
+        return objects
